@@ -66,3 +66,84 @@ class WordEmbeddings(L.LightningModule):
         output_i = self.forward(input_i)
         loss = self.loss(output_i, label_i[0])
         return loss
+
+
+class WordnPositionalEmbeddings(L.LightningModule):
+    def __init__(
+        self,
+        vocab_size: int,
+        network_width: int = 2,
+    ):
+        super().__init__()
+        min_thresh = -0.5
+        max_thresh = 0.5
+
+        # add positional encoding methods as a list
+        self.positional_encoders = get_positional_encoders(network_width)
+        # set weights with appropriate width and length
+        self.vocab_size = vocab_size
+        self.network_width = network_width
+        for width in range(network_width):
+            for vocab_item_weight in range(vocab_size):
+                setattr(
+                    self,
+                    f"input_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+                setattr(
+                    self,
+                    f"output_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+        self.loss = nn.CrossEntropyLoss()
+
+        pass
+
+    def forward(self, input_tensor):
+        inputs = []
+        input_tensor = input_tensor[0]
+        for width in range(self.network_width):
+            input_item_weight = 0.0
+            for vocab_item_weight in range(self.vocab_size):
+                input_item_weight = input_item_weight + (
+                    input_tensor[vocab_item_weight]
+                    * getattr(self, f"input_weight_{vocab_item_weight}_{width}")
+                )
+            inputs.append(input_item_weight)
+        outputs = []
+        for width_id, width in enumerate(range(self.vocab_size)):
+            output_item_weight = 0.0
+            for vocab_item_weight_id, vocab_item_weight in enumerate(inputs):
+                output_item_weight = output_item_weight + vocab_item_weight * getattr(
+                    self, f"input_weight_{width_id}_{vocab_item_weight_id}"
+                )
+                # positional encoding
+                # for the nth token take frequency as n+1
+                frequency = 1 * vocab_item_weight_id
+                positional_encoding = self.positional_encoders[vocab_item_weight_id](
+                    torch.tensor((frequency) * width_id)
+                )
+                output_item_weight = output_item_weight + positional_encoding
+
+            outputs.append(output_item_weight)
+        output_pre_softmax = torch.stack(outputs)
+
+        return output_pre_softmax
+
+    def configure_optimizers(self):
+        return Adam(self.parameters(), lr=0.1)
+
+    def training_step(self, batch, batch_idx):
+        input_i, label_i = batch
+        output_i = self.forward(input_i)
+        loss = self.loss(output_i, label_i[0])
+        return loss
+
+
+def get_positional_encoders(network_width):
+    encoders = [torch.sin, torch.cos]
+    # based on the network width provide alternating sin and cos functions as encoders. Frequency management is done in forward method
+    return [
+        encoders[network_with_element % 2]
+        for network_with_element in range(network_width)
+    ]
