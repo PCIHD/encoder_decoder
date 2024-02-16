@@ -109,23 +109,31 @@ class WordnPositionalEmbeddings(L.LightningModule):
                     input_tensor[vocab_item_weight]
                     * getattr(self, f"input_weight_{vocab_item_weight}_{width}")
                 )
+                # positional encoding
+                # for the nth token take frequency as n+1
+                frequency = 1 * vocab_item_weight
+                positional_encoding = self.positional_encoders[width](
+                    torch.tensor((frequency) * width)
+                )
+                input_item_weight = input_item_weight + positional_encoding
             inputs.append(input_item_weight)
         outputs = []
         for width_id, width in enumerate(range(self.vocab_size)):
             output_item_weight = 0.0
             for vocab_item_weight_id, vocab_item_weight in enumerate(inputs):
                 output_item_weight = output_item_weight + vocab_item_weight * getattr(
-                    self, f"input_weight_{width_id}_{vocab_item_weight_id}"
+                    self, f"output_weight_{width_id}_{vocab_item_weight_id}"
                 )
-                # positional encoding
-                # for the nth token take frequency as n+1
-                frequency = 1 * vocab_item_weight_id
-                positional_encoding = self.positional_encoders[vocab_item_weight_id](
-                    torch.tensor((frequency) * width_id)
-                )
-                output_item_weight = output_item_weight + positional_encoding
+                # # positional encoding
+                # # for the nth token take frequency as n+1
+                # frequency = 1 * vocab_item_weight_id
+                # positional_encoding = self.positional_encoders[vocab_item_weight_id](
+                #     torch.tensor((frequency) * width_id)
+                # )
+                # output_item_weight = output_item_weight + positional_encoding
 
             outputs.append(output_item_weight)
+
         output_pre_softmax = torch.stack(outputs)
 
         return output_pre_softmax
@@ -147,3 +155,134 @@ def get_positional_encoders(network_width):
         encoders[network_with_element % 2]
         for network_with_element in range(network_width)
     ]
+
+
+class WordnPositionalSelfAttentionEmbeddings(L.LightningModule):
+    def __init__(
+        self,
+        vocab_size: int,
+        network_width: int = 2,
+    ):
+        super().__init__()
+        min_thresh = -0.5
+        max_thresh = 0.5
+
+        # add positional encoding methods as a list
+        self.positional_encoders = get_positional_encoders(network_width)
+        # set weights with appropriate width and length
+        self.vocab_size = vocab_size
+        self.network_width = network_width
+        for width in range(network_width):
+            for vocab_item_weight in range(vocab_size):
+                setattr(
+                    self,
+                    f"input_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+                setattr(
+                    self,
+                    f"output_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+
+                setattr(
+                    self,
+                    f"key_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+
+                setattr(
+                    self,
+                    f"query_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+
+                setattr(
+                    self,
+                    f"value_weight_{vocab_item_weight}_{width}",
+                    nn.Parameter(Uniform(min_thresh, max_thresh).sample()),
+                )
+        self.loss = nn.CrossEntropyLoss()
+
+        pass
+
+    def forward(self, input_tensor):
+        inputs = []
+        input_tensor = input_tensor[0]
+        for width in range(self.network_width):
+            input_item_weight = torch.tensor(0.0)
+            for vocab_item_weight in range(self.vocab_size):
+                input_item_weight = input_item_weight + (
+                    input_tensor[vocab_item_weight]
+                    * getattr(self, f"input_weight_{vocab_item_weight}_{width}")
+                )
+                # positional encoding
+                # for the nth token take frequency as n+1
+                frequency = 1 * vocab_item_weight
+                positional_encoding = self.positional_encoders[width](
+                    torch.tensor((frequency) * width)
+                )
+                input_item_weight = input_item_weight + positional_encoding
+            inputs.append(input_item_weight)
+        query_vector = []
+        key_vector = []
+        value_vector = []
+        for input_id, input_value in enumerate(inputs):
+            key = []
+            query = []
+            value = []
+            for width in range(self.network_width):
+                key.append(
+                    input_value * getattr(self, f"key_weight_{input_id}_{width}")
+                )
+                query.append(
+                    input_value * getattr(self, f"query_weight_{input_id}_{width}")
+                )
+                value.append(
+                    input_value * getattr(self, f"value_weight_{input_id}_{width}")
+                )
+            query_vector.append(query)
+            key_vector.append(key)
+            value_vector.append(value)
+        query_vector = torch.tensor(query_vector).to("cuda:0")
+        key_vector = torch.tensor(key_vector).to("cuda:0")
+        value_vector = torch.tensor(value_vector).to("cuda:0")
+
+        attention_values = self.calculate_attention(
+            query_vector, key_vector, value_vector
+        )
+        output_values = []
+        for input_tensor_values_id, input_tensor_values in enumerate(inputs):
+            output_values.append(
+                input_tensor_values * attention_values[input_tensor_values_id][0]
+                + input_tensor_values * attention_values[input_tensor_values_id][1]
+            )
+
+        outputs = []
+        for width_id, width in enumerate(range(self.vocab_size)):
+            output_item_weight = torch.tensor(0.0)
+            for vocab_item_weight_id, vocab_item_weight in enumerate(output_values):
+                output_item_weight = output_item_weight + vocab_item_weight * getattr(
+                    self, f"output_weight_{width_id}_{vocab_item_weight_id}"
+                )
+
+            outputs.append(output_item_weight)
+
+        output_pre_softmax = torch.stack(outputs)
+        return output_pre_softmax
+
+    def calculate_attention(self, query_vector, key_vector, value_vector):
+        qk_t = torch.matmul(query_vector, torch.transpose(key_vector, 1, 0))
+        qk_t_div_v = torch.div(qk_t, torch.sqrt(torch.tensor(self.vocab_size)))
+        softmaxed = torch.softmax(qk_t_div_v, dim=0)
+        attention = torch.matmul(softmaxed, value_vector)
+        return attention
+
+    def configure_optimizers(self):
+        return Adam(self.parameters(), lr=0.1)
+
+    def training_step(self, batch, batch_idx):
+        input_i, label_i = batch
+        output_i = self.forward(input_i)
+        loss = self.loss(output_i, label_i[0])
+        return loss
