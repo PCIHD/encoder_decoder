@@ -210,8 +210,9 @@ class WordnPositionalSelfAttentionEmbeddings(L.LightningModule):
         inputs = []
         input_tensor = input_tensor[0]
         for width in range(self.network_width):
-            input_item_weight = torch.tensor(0.0)
+            input_item_weight_vector = []
             for vocab_item_weight in range(self.vocab_size):
+                input_item_weight = torch.tensor(0.0)
                 input_item_weight = input_item_weight + (
                     input_tensor[vocab_item_weight]
                     * getattr(self, f"input_weight_{vocab_item_weight}_{width}")
@@ -223,7 +224,8 @@ class WordnPositionalSelfAttentionEmbeddings(L.LightningModule):
                     torch.tensor((frequency) * width)
                 )
                 input_item_weight = input_item_weight + positional_encoding
-            inputs.append(input_item_weight)
+                input_item_weight_vector.append(input_item_weight)
+            inputs.append(input_item_weight_vector)
         query_vector = []
         key_vector = []
         value_vector = []
@@ -231,15 +233,18 @@ class WordnPositionalSelfAttentionEmbeddings(L.LightningModule):
             key = []
             query = []
             value = []
-            for width in range(self.network_width):
+            for vocab_size_value in range(self.vocab_size):
                 key.append(
-                    input_value * getattr(self, f"key_weight_{input_id}_{width}")
+                    input_value[vocab_size_value]
+                    * getattr(self, f"key_weight_{vocab_size_value}_{input_id}")
                 )
                 query.append(
-                    input_value * getattr(self, f"query_weight_{input_id}_{width}")
+                    input_value[vocab_size_value]
+                    * getattr(self, f"query_weight_{vocab_size_value}_{input_id}")
                 )
                 value.append(
-                    input_value * getattr(self, f"value_weight_{input_id}_{width}")
+                    input_value[vocab_size_value]
+                    * getattr(self, f"value_weight_{vocab_size_value}_{input_id}")
                 )
             query_vector.append(query)
             key_vector.append(key)
@@ -251,20 +256,15 @@ class WordnPositionalSelfAttentionEmbeddings(L.LightningModule):
         attention_values = self.calculate_attention(
             query_vector, key_vector, value_vector
         )
-        output_values = []
-        for input_tensor_values_id, input_tensor_values in enumerate(inputs):
-            output_values.append(
-                input_tensor_values * attention_values[input_tensor_values_id][0]
-                + input_tensor_values * attention_values[input_tensor_values_id][1]
-            )
-
+        inputs = torch.tensor(inputs).to("cuda:0")
+        output_values = inputs + attention_values
         outputs = []
         for width_id, width in enumerate(range(self.vocab_size)):
             output_item_weight = torch.tensor(0.0)
             for vocab_item_weight_id, vocab_item_weight in enumerate(output_values):
-                output_item_weight = output_item_weight + vocab_item_weight * getattr(
-                    self, f"output_weight_{width_id}_{vocab_item_weight_id}"
-                )
+                output_item_weight = output_item_weight + vocab_item_weight[
+                    width_id
+                ] * getattr(self, f"output_weight_{width_id}_{vocab_item_weight_id}")
 
             outputs.append(output_item_weight)
 
